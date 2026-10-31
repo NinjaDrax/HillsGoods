@@ -2,7 +2,7 @@
 // Load this file after setting API_BASE to your deployed backend URL.
 // Never place MongoDB credentials or SETUP_SECRET in frontend code.
 window.HillsgoodsAPI = (() => {
-  const API_BASE = "https://YOUR-BACKEND.onrender.com";
+  const API_BASE = "https://hillsgoods-api.onrender.com";
   const tokenKey = "hillsgoods_session_token";
 
   function token() { return sessionStorage.getItem(tokenKey); }
