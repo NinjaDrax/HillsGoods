@@ -26,10 +26,13 @@ const userSchema = new mongoose.Schema({
  passwordHash:{type:String,required:true},
  role:{type:String,enum:["admin","staff"],default:"admin"},
  businessName:{type:String,default:"Hillsgoods",maxlength:120},
- businessTagline:{type:String,default:"Malamchirakk",maxlength:200}
+ businessTagline:{type:String,default:"Malamchirakk",maxlength:200},
+ language:{type:String,enum:["en","ml"],default:"en"}
 },{timestamps:true});
 const productSchema = new mongoose.Schema({
- name:{type:String,required:true,trim:true,maxlength:120},
+ name:{type:String,trim:true,default:"",maxlength:120},
+ nameEn:{type:String,trim:true,default:"",maxlength:120},
+ nameMl:{type:String,trim:true,default:"",maxlength:120},
  category:{type:String,required:true,trim:true,maxlength:80},
  unit:{type:String,enum:["kg","liter","pcs"],required:true},
  stock:{type:Number,min:0,default:0},
@@ -72,14 +75,18 @@ const Product=mongoose.model("Product",productSchema);
 const Transaction=mongoose.model("Transaction",transactionSchema);
 const RateHistory=mongoose.model("RateHistory",rateSchema);
 
-const productInput=z.object({
- name:z.string().trim().min(1).max(120),category:z.string().trim().min(1).max(80),
+const productInputBase=z.object({
+ name:z.string().trim().max(120).optional().default(""),
+ nameEn:z.string().trim().max(120).optional().default(""),
+ nameMl:z.string().trim().max(120).optional().default(""),
+ category:z.string().trim().min(1).max(80),
  unit:z.enum(["kg","liter","pcs"]),stock:z.coerce.number().min(0).optional(),
  purchaseRate:z.coerce.number().min(0),salesRate:z.coerce.number().min(0),
  currentMarketRate:z.coerce.number().min(0).optional().default(0),
  lowStockThreshold:z.coerce.number().min(0).optional().default(10),
  imageUrl:z.string().max(1400000).optional().default("")
 });
+const productInput=productInputBase.refine(v=>Boolean(v.nameEn||v.nameMl||v.name),{message:"Enter an English or Malayalam product name."});
 const transactionInput=z.object({
  type:z.enum(["Purchase","Sale","Expense"]),date:z.coerce.date(),
  productId:z.string().nullable().optional(),productName:z.string().trim().min(1).max(120),
@@ -87,7 +94,8 @@ const transactionInput=z.object({
  unit:z.enum(["kg","liter","pcs","none"]),rate:z.coerce.number().min(0),amount:z.coerce.number().min(0),
  notes:z.string().trim().max(1000).optional().default("")
 });
-function publicUser(u){return {id:u._id,name:u.name,email:u.email,role:u.role,businessName:u.businessName,businessTagline:u.businessTagline};}
+function publicUser(u){return {id:u._id,name:u.name,email:u.email,role:u.role,businessName:u.businessName,businessTagline:u.businessTagline,language:u.language||"en"};}
+function productNames(p){const raw=p?.toObject ? p.toObject() : p;return {...raw,nameEn:raw.nameEn||raw.name||"",nameMl:raw.nameMl||"",name:raw.name||raw.nameEn||raw.nameMl||""};}
 function auth(req,res,next){const h=req.headers.authorization||"";const token=h.startsWith("Bearer ")?h.slice(7):"";if(!token)return res.status(401).json({error:"Sign in required."});try{req.user=jwt.verify(token,process.env.JWT_SECRET);next()}catch{return res.status(401).json({error:"Session expired. Please sign in again."})}}
 function admin(req,res,next){if(req.user.role!=="admin")return res.status(403).json({error:"Admin access required."});next()}
 function invoiceNo(){return "HG-"+new Date().toISOString().slice(0,10).replaceAll("-","")+"-"+Math.random().toString(36).slice(2,7).toUpperCase()}
@@ -110,10 +118,25 @@ app.post("/api/login",rateLimit({windowMs:900000,limit:10}),async(req,res)=>{
  }catch(e){console.error("Login error:",e.message);res.status(500).json({error:"Could not sign in."})}
 });
 app.use("/api",auth);
+// Admin-only user management. Passwords are never returned and are always hashed.
+app.get("/api/users",admin,async(_req,res)=>res.json((await User.find().sort({createdAt:1}).lean()).map(u=>({id:u._id,name:u.name,email:u.email,role:u.role,language:u.language||"en",createdAt:u.createdAt}))));
+app.post("/api/users",admin,rateLimit({windowMs:3600000,limit:30}),async(req,res)=>{
+ const p=z.object({name:z.string().trim().min(1).max(100),email:z.string().email().max(200),password:z.string().min(12).max(200),role:z.enum(["admin","staff"]).default("staff"),language:z.enum(["en","ml"]).default("en")}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:"Enter a name, valid email, password (at least 12 characters), role and language."});
+ try{const u=await User.create({...p.data,email:p.data.email.toLowerCase(),passwordHash:await bcrypt.hash(p.data.password,12)});res.status(201).json({id:u._id,name:u.name,email:u.email,role:u.role,language:u.language,createdAt:u.createdAt})}
+ catch(e){if(e.code===11000)return res.status(409).json({error:"An account with that email already exists."});console.error("Create user:",e.message);res.status(500).json({error:"Could not create user."})}
+});
+app.patch("/api/users/:id",admin,async(req,res)=>{
+ const p=z.object({name:z.string().trim().min(1).max(100).optional(),role:z.enum(["admin","staff"]).optional(),language:z.enum(["en","ml"]).optional(),password:z.string().min(12).max(200).optional()}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:"Invalid user details. Passwords must be at least 12 characters."});
+ if(req.params.id===req.user.sub&&p.data.role==="staff")return res.status(400).json({error:"You cannot remove your own admin role."});
+ try{const changes={...p.data};if(changes.password){changes.passwordHash=await bcrypt.hash(changes.password,12);delete changes.password}const u=await User.findByIdAndUpdate(req.params.id,changes,{new:true,runValidators:true});if(!u)return res.status(404).json({error:"User not found."});res.json({id:u._id,name:u.name,email:u.email,role:u.role,language:u.language||"en"})}
+ catch(e){res.status(500).json({error:"Could not update user."})}
+});
 
 app.get("/api/me",async(req,res)=>{const u=await User.findById(req.user.sub);if(!u)return res.status(404).json({error:"User not found."});res.json(publicUser(u))});
 app.patch("/api/me",async(req,res)=>{
- const parsed=z.object({name:z.string().trim().min(1).max(100),email:z.string().email().max(200),businessName:z.string().trim().max(120).optional().default("Hillsgoods"),businessTagline:z.string().trim().max(200).optional().default("Malamchirakk")}).safeParse(req.body);
+ const parsed=z.object({name:z.string().trim().min(1).max(100),email:z.string().email().max(200),businessName:z.string().trim().max(120).optional().default("Hillsgoods"),businessTagline:z.string().trim().max(200).optional().default("Malamchirakk"),language:z.enum(["en","ml"]).optional()}).safeParse(req.body);
  if(!parsed.success)return res.status(400).json({error:"Invalid profile details."});
  try{const duplicate=await User.findOne({email:parsed.data.email.toLowerCase(),_id:{$ne:req.user.sub}});if(duplicate)return res.status(409).json({error:"That email is already in use."});
  const u=await User.findByIdAndUpdate(req.user.sub,{...parsed.data,email:parsed.data.email.toLowerCase()},{new:true,runValidators:true});res.json(publicUser(u));
@@ -126,15 +149,15 @@ app.patch("/api/me/password",async(req,res)=>{
 });
 
 // Product data starts empty; no demonstration records are seeded.
-app.get("/api/products",async(_req,res)=>res.json(await Product.find({active:true}).sort({name:1}).lean()));
+app.get("/api/products",async(_req,res)=>res.json((await Product.find({active:true}).sort({name:1}).lean()).map(p=>({...p,nameEn:p.nameEn||p.name||"",nameMl:p.nameMl||"",name:p.name||p.nameEn||p.nameMl||""}))));
 app.post("/api/products",async(req,res)=>{
  const p=productInput.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid product details."});
- try{const data={...p.data,stock:p.data.stock??0,averageCost:p.data.purchaseRate};const product=await Product.create(data);res.status(201).json(product)}
+ try{const data={...p.data,name:p.data.name||p.data.nameEn||p.data.nameMl,stock:p.data.stock??0,averageCost:p.data.purchaseRate};const product=await Product.create(data);res.status(201).json(productNames(product))}
  catch(e){res.status(400).json({error:"Could not create product."})}
 });
 app.patch("/api/products/:id",async(req,res)=>{
- const p=productInput.partial().safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid product details."});
- try{const update={...p.data};delete update.stock;const product=await Product.findOneAndUpdate({_id:req.params.id,active:true},update,{new:true,runValidators:true});if(!product)return res.status(404).json({error:"Product not found."});res.json(product)}
+ const p=productInputBase.partial().safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid product details."});
+ try{const update={...p.data};delete update.stock;if(update.nameEn||update.nameMl)update.name=update.name||update.nameEn||update.nameMl;const product=await Product.findOneAndUpdate({_id:req.params.id,active:true},update,{new:true,runValidators:true});if(!product)return res.status(404).json({error:"Product not found."});res.json(productNames(product))}
  catch(e){res.status(400).json({error:"Could not update product."})}
 });
 app.delete("/api/products/:id",async(req,res)=>{const p=await Product.findByIdAndUpdate(req.params.id,{active:false},{new:true});if(!p)return res.status(404).json({error:"Product not found."});res.json({ok:true})});
