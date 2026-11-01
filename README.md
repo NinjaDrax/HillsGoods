@@ -61,6 +61,12 @@ Purchase transactions add quantity to stock; sales subtract quantity and are rej
 7. Set `FRONTEND_ORIGIN` to your exact Netlify domain, plus localhost during local testing if needed.
 8. Deploy and verify `https://YOUR-BACKEND.onrender.com/api/health`.
 
+## Language and user accounts
+- Every user has an independent `language` preference (`en` or `ml`).
+- Products are stored once with optional `nameEn` and `nameMl`. The frontend displays the preferred-language name and falls back to the other language. Existing products that only have `name` continue to work as the English/legacy name.
+- Sign in as the admin and open Settings → User management to create individual staff/admin accounts. Initial passwords must be at least 12 characters and are stored as bcrypt hashes; the API never returns password hashes.
+- The initial admin still needs to be created through the one-time `/api/setup` route. Keep `SETUP_SECRET` private.
+
 ## Stage 5: Frontend integration
 `frontend/api-client.js` is a starter client. Replace `https://YOUR-BACKEND.onrender.com` with the deployed backend URL, then connect the existing page forms to it. A login screen should be added before showing business records. Do not expose `MONGODB_URI`, `JWT_SECRET`, or `SETUP_SECRET` in frontend JavaScript.
 
