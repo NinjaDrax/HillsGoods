@@ -14,6 +14,9 @@ for (const key of required) if (!process.env[key]) { console.error(`Missing requ
 if (process.env.JWT_SECRET.length < 32) { console.error("JWT_SECRET must be at least 32 characters."); process.exit(1); }
 
 const app = express();
+// Render runs Express behind a reverse proxy. Trust the single proxy hop
+// so express-rate-limit can safely identify the originating client IP.
+app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(cors({origin:process.env.FRONTEND_ORIGIN.split(",").map(s=>s.trim()),methods:["GET","POST","PATCH","DELETE","OPTIONS"],allowedHeaders:["Content-Type","Authorization"]}));
@@ -112,10 +115,30 @@ app.post("/api/setup",rateLimit({windowMs:3600000,limit:5}),async(req,res)=>{
  }catch(e){console.error("Setup error:",e.message);res.status(500).json({error:"Could not complete setup."})}
 });
 app.post("/api/login",rateLimit({windowMs:900000,limit:10}),async(req,res)=>{
- try{const p=z.object({email:z.string().email(),password:z.string().min(1).max(200)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Enter email and password."});
- const u=await User.findOne({email:p.data.email.toLowerCase()});if(!u||!(await bcrypt.compare(p.data.password,u.passwordHash)))return res.status(401).json({error:"Incorrect email or password."});
- const token=jwt.sign({sub:u._id.toString(),email:u.email,role:u.role},process.env.JWT_SECRET,{expiresIn:"8h"});res.json({token,user:publicUser(u),expiresIn:28800});
- }catch(e){console.error("Login error:",e.message);res.status(500).json({error:"Could not sign in."})}
+ const loginStarted = process.hrtime.bigint();
+ let userLookupMs = 0;
+ let passwordCompareMs = 0;
+ try {
+  const p=z.object({email:z.string().email(),password:z.string().min(1).max(200)}).safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:"Enter email and password."});
+  let stepStarted = process.hrtime.bigint();
+  const u=await User.findOne({email:p.data.email.toLowerCase()});
+  userLookupMs = Number(process.hrtime.bigint()-stepStarted)/1e6;
+  if(!u){
+   console.info(`Login timings: userLookup=${userLookupMs.toFixed(1)}ms passwordCompare=skipped total=${(Number(process.hrtime.bigint()-loginStarted)/1e6).toFixed(1)}ms`);
+   return res.status(401).json({error:"Incorrect email or password."});
+  }
+  stepStarted = process.hrtime.bigint();
+  const passwordValid = await bcrypt.compare(p.data.password,u.passwordHash);
+  passwordCompareMs = Number(process.hrtime.bigint()-stepStarted)/1e6;
+  if(!passwordValid){
+   console.info(`Login timings: userLookup=${userLookupMs.toFixed(1)}ms passwordCompare=${passwordCompareMs.toFixed(1)}ms total=${(Number(process.hrtime.bigint()-loginStarted)/1e6).toFixed(1)}ms`);
+   return res.status(401).json({error:"Incorrect email or password."});
+  }
+  const token=jwt.sign({sub:u._id.toString(),email:u.email,role:u.role},process.env.JWT_SECRET,{expiresIn:"8h"});
+  console.info(`Login timings: userLookup=${userLookupMs.toFixed(1)}ms passwordCompare=${passwordCompareMs.toFixed(1)}ms total=${(Number(process.hrtime.bigint()-loginStarted)/1e6).toFixed(1)}ms`);
+  res.json({token,user:publicUser(u),expiresIn:28800});
+ } catch(e) { console.error("Login error:",e.message);res.status(500).json({error:"Could not sign in."}); }
 });
 app.use("/api",auth);
 // Admin-only user management. Passwords are never returned and are always hashed.
